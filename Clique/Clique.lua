@@ -1,7 +1,9 @@
 --[[---------------------------------------------------------------------------------
   Clique by Cladhaire <cladhaire@gmail.com>
-----------------------------------------------------------------------------------]] Clique = {
-	Locals = {}
+----------------------------------------------------------------------------------]]
+
+Clique = {
+	Locals = {},
 }
 
 assert(DongleStub, string.format("Clique requires DongleStub."))
@@ -32,6 +34,26 @@ function Clique:Enable()
 		char = {
 			switchSpec = false,
 			downClick = false
+		},
+		frames = {
+			PlayerFrame,
+			PetFrame,
+			PartyMemberFrame1,
+			PartyMemberFrame2,
+			PartyMemberFrame3,
+			PartyMemberFrame4,
+			PartyMemberFrame1PetFrame,
+			PartyMemberFrame2PetFrame,
+			PartyMemberFrame3PetFrame,
+			PartyMemberFrame4PetFrame,
+			TargetFrame,
+			TargetFrameToT,
+			FocusFrame,
+			FocusFrameToT,
+			Boss1TargetFrame,
+			Boss2TargetFrame,
+			Boss3TargetFrame,
+			Boss4TargetFrame,
 		}
 	}
 
@@ -72,6 +94,12 @@ function Clique:Enable()
 	self:RegisterEvent("LEARNED_SPELL_IN_TAB")
 	self:RegisterEvent("ASCENSION_CA_SPECIALIZATION_ACTIVE_ID_CHANGED")
 	self:RegisterEvent("ADDON_LOADED")
+
+	self:RegisterEvent("PLAYER_ENTERING_WORLD")
+	self:RegisterEvent("RAID_ROSTER_UPDATE")
+	self:RegisterEvent("PARTY_MEMBERS_CHANGED")
+	self:RegisterEvent("UNIT_PET")
+	self:RegisterEvent("CVAR_UPDATE")
 
 	-- Change to correct profile based on talent spec
 	if self.db.char.switchSpec then
@@ -129,10 +157,7 @@ function Clique:Enable()
 end
 
 function Clique:EnableFrames()
-	local tbl = {PlayerFrame, PetFrame, PartyMemberFrame1, PartyMemberFrame2, PartyMemberFrame3, PartyMemberFrame4,
-              PartyMemberFrame1PetFrame, PartyMemberFrame2PetFrame, PartyMemberFrame3PetFrame,
-              PartyMemberFrame4PetFrame, TargetFrame, TargetFrameToT, FocusFrame, FocusFrameToT, Boss1TargetFrame,
-              Boss2TargetFrame, Boss3TargetFrame, Boss4TargetFrame}
+	local tbl = self.defaults.frames
 
 	for i, frame in pairs(tbl) do
 		rawset(self.ccframes, frame, true)
@@ -766,3 +791,97 @@ function Clique:ADDON_LOADED(event, addon)
 		self:EnableArenaFrames()
 	end
 end
+
+-- Check whether the user is in a raid group or has raid-style party frames (CompactRaidFrames) enabled
+function Clique:IsInRaidOrHasRaidFramesEnabled()
+	return IsInRaid() or GetCVarBool("useCompactPartyFrames")
+end
+
+-- Remove stale frames from `self.ccframes` that are no longer valid.
+--
+-- Ensures we only store the default frames and currently active raid frames.
+function Clique:CleanStaleCCFrames(frames)
+	local validFrames = {}
+
+	-- add default frames
+	for _, f in ipairs(self.defaults.frames) do
+		validFrames[f] = true
+	end
+
+	-- add provided frames (e.g. dynamic raid frames)
+	for _, f in ipairs(frames) do
+		validFrames[f] = true
+	end
+
+	-- prune stale frames that are no longer valid
+	for f in pairs(self.ccframes) do
+		if not validFrames[f] then
+			self.ccframes[f] = nil
+		end
+	end
+end
+
+-- Enumerate and return currently active raid frames
+--
+-- NOTE: CompactRaidFrames, or rather all raid frames in general – for either a
+-- player or their pets – should be defined in the following format:
+-- CompactRaidFrame{index} e.g. CompactRaidFrame1.
+function Clique:GetActiveRaidFrames()
+	local frames = {}
+
+	local frame = EnumerateFrames()
+	while frame do
+		local name = frame:GetName()
+		-- include only raid frames starting with `CompactRaidFrame` and ending with
+		-- a digit while having a valid unit value (ensures the frame belongs to a
+		-- player)
+		if name and name:find("^CompactRaidFrame%d+$") and frame.unit then
+			table.insert(frames, frame)
+		end
+
+		frame = EnumerateFrames(frame)
+	end
+
+	return frames
+end
+
+-- Collect currently active raid frames, prune stale ones and re-register valid
+-- ones
+function Clique:EnableRaidFrames()
+	local raidFrames = self:GetActiveRaidFrames()
+	self:CleanStaleCCFrames(raidFrames)
+	for _, f in ipairs(raidFrames) do
+		self:RegisterFrame(f)
+	end
+end
+
+-- Shared event handler for syncing dynamic raid/party frame changes
+--
+-- NOTE: CompactRaidFrames, or rather all raid frames in general, are dynamic and are added to the
+-- UIParent's "frame tree" on-demand, which requires hooking into multiple
+-- different events that gets fired when the party or raid group roster changes.
+-- Pets or CVar -related events need special handling and thus are separated.
+local function HandleRaidFrameSync(self, event, unit)
+	if not self:IsInRaidOrHasRaidFramesEnabled() then return end
+
+	if event == "UNIT_PET" then
+		-- only refresh if the pet belongs to player/party/raid
+		if unit == "player" or unit:match("^party%d+$") or unit:match("^raid%d+$") then
+			self:EnableRaidFrames()
+		end
+	elseif event == "CVAR_UPDATE" then
+		-- sync raid frames when toggling the interface option on/off
+		if unit == "USE_RAID_STYLE_PARTY_FRAMES" then
+			self:EnableRaidFrames()
+		end
+	else
+		self:EnableRaidFrames()
+	end
+end
+
+-- Bind handler to events
+Clique.PLAYER_ENTERING_WORLD = HandleRaidFrameSync
+Clique.RAID_ROSTER_UPDATE = HandleRaidFrameSync
+Clique.PARTY_MEMBERS_CHANGED = HandleRaidFrameSync
+Clique.UNIT_PET = HandleRaidFrameSync
+Clique.CVAR_UPDATE = HandleRaidFrameSync
